@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import cv2
 import os
+import statistics
 
 from scipy.cluster.vq import vq, kmeans, whiten, kmeans2
 
@@ -116,7 +117,7 @@ def hough_lines(img, threshold):
                 # print(rs)
                 accumulator[angle_inds, rs]+=1
                 for i in range(360):
-                    angle_r_to_x_y[i][rs[i]].append((x,y))
+                    angle_r_to_x_y[i][rs[i]].append([x,y])
    # print(accumulator.mean())
     #print(accumulator)
     #thetas, rs, = np.where(accumulator>threshold)
@@ -159,15 +160,183 @@ def hough_lines(img, threshold):
     #thetas, rs = np.nonzero(np.where(accumulator >  0.5*np.max(accumulator)))
     return  np.vstack((np.arange(r_max)[rs], thetas)).T, filtered_angle_r_to_x_y
 
+def optical_flow(topdown_im_0,topdown_im_1,p0):
+
+    # print(p0)   
+    p0 = p0.reshape((p0.shape[0], 1,p0.shape[1])) 
+    
+
+    lk_params = dict( winSize  = (20, 20),
+                  maxLevel = 4,
+                  criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+    
+    feature_params = dict( maxCorners = 100,
+                       qualityLevel = 0.1,
+                       minDistance = 1,
+                       blockSize = 1 )
+    # print(p0.shape)
+    # p0 = cv2.goodFeaturesToTrack(topdown_im_0.astype('uint8'), mask = None, **feature_params)
+    # print(p0)
+    # p0 = p0[p0[:,0,1] < 350]
+
+    p1, st, err = cv2.calcOpticalFlowPyrLK(topdown_im_0.astype('uint8'), topdown_im_1.astype('uint8'), p0.astype('float32'), None, **lk_params)
+    p0 = p0.reshape(p0.shape[0], -1)
+    p1 = p1.reshape(p1.shape[0], -1)
+
+    # change in location of points
+    mvmt = p1-p0
+    mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
+    # print(ang.shape)
+
+    std_dev_ang = statistics.stdev(ang[:,0])
+    std_dev_mag = statistics.stdev(mag[:,0])
+
+    #filter based on standard deviation
+    filter = ((ang[:,0] >= np.mean(ang[:,0]) - std_dev_ang) & 
+                     (ang[:,0] <= np.mean(ang[:,0]) + std_dev_ang))
+    
+    filter_mag = ((mag[:,0] >= np.mean(mag[:,0]) - std_dev_mag) & 
+                    (mag[:,0] <= np.mean(mag[:,0]) + std_dev_mag))
+    
+    p0 = p0[filter & filter_mag,:]
+    p1 = p1[filter & filter_mag,:]
+    mvmt = mvmt[filter & filter_mag,:]
+    mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
+    shift = np.mean((p1-p0)[:,0])
+    # print(np.mean(ang))
+
+    # p0 = p0[filter_mag,:]
+    # p1 = p1[filter_mag,:]
+    # mvmt = mvmt[filter_mag,:]
+    # p0 = p0[(ang >= np.mean(ang) - std_dev_ang) & 
+    #                  (ang <= np.mean(ang) + std_dev_ang),:]
+    
+
+
+    # print(mag,ang)
+    mvmt_mag = np.linalg.norm(p1-p0, axis = 1)
+
+    fig, ax = plt.subplots()
+    ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
+
+    # plt.scatter(p1[:,0],p1[:,1])
+    # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
+    ax.imshow(topdown_im_0,cmap='gray')
+    plt.show()
+    # print(shift)
+
+    return shift
+
+def get_car_direction(im0, im1):
+
+    feature_params = dict( maxCorners = 100,
+                        qualityLevel = 0.6,
+                        minDistance = 7,
+                        blockSize = 9 )
+    # Parameters for lucas kanade optical flow
+    lk_params = dict( winSize  = (15, 15),
+                    maxLevel = 2,
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+
+    p0 = cv2.goodFeaturesToTrack(im0.astype('uint8'), mask = None, **feature_params)
+
+    p1, st, err = cv2.calcOpticalFlowPyrLK(im0.astype('uint8'), im1.astype('uint8'), p0, None, **lk_params)
+    p0 = p0.reshape(p0.shape[0], -1)
+    p1 = p1.reshape(p1.shape[0], -1)
+    # color = (255,0, 0)  # Green color in BGR format
+
+    # remove all points below the dashboard
+    dash = 400
+
+    # p1 = p1[p1[:,1] < 350]
+
+    # change in location of points
+    mvmt = p1-p0
+    mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
+    # print(mag,ang)
+    mvmt_mag = np.linalg.norm(p1-p0, axis = 1)
+
+    #calculate relative motion from center distance
+    origin = np.array([int(im0.shape[1]/2),775])
+
+    # determine the type of motion
+    # determine if all have a component in the horiz moving in one direction
+    mvmt_pos = sum(mvmt[:,0]> 0) 
+    mvmt_neg = sum(mvmt[:,0]< 0) 
+
+    fwd = True
+    if mvmt.shape[0]>0:
+        if (mvmt_pos/mvmt.shape[0]>0.3) & (mvmt_pos/mvmt.shape[0]<0.7):
+            fwd = True
+        else:
+            fwd = False
+
+        # if move in one direction, check if changing lanes or turning
+        # if turning, check what direction
+        right = False
+
+        if not fwd:
+            if mvmt_pos > mvmt_neg:
+                right = True
+            else:
+                right = False
+
+
+        # logic for lane change ?
+
+        # assume small motion
+        pnt_dist = p0 - origin
+        mag_0, ang_0 = cv2.cartToPolar(pnt_dist[..., 0], pnt_dist[..., 1])
+
+
+
+        # partition into right/left sides
+        right_pts_mask = pnt_dist[:,0] > 0 
+        left_pts = pnt_dist[:,0] < 0 
+
+        # filter out large angular distances irregularities
+        # do it based on movement
+        # if turning, filter out all not going in that direction
+        # if not turning, filter out based on all not pointing away from center
+        # print(180*(ang-ang_0)[right_pts_mask]/np.pi)
+
+
+        # filter out large magnatude change
+        # print(p0)
+        # print(pnt_dist)
+
+
+        fig, ax = plt.subplots()
+        ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
+
+        # plt.scatter(p1[:,0],p1[:,1])
+        # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
+        ax.imshow(im0,cmap='gray')
+        plt.show()
+
+        # fig, ax = plt.subplots()
+        # ax.imshow(im0,cmap='gray')
+
+        # fig, ax = plt.subplots()
+        # ax.imshow(im1,cmap='gray')
+    pass
+
 def generate_outputs_for_driver(driver_path, output_dir, homog_params):
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
-    for video in os.listdir(driver)[30:31]:
+    direct = sorted(os.listdir(driver))
+    for video in direct[30:31]:
         if not os.path.isdir(output_dir+video):
             os.mkdir(output_dir+video)
         files = [frame for frame in os.listdir(driver_path+video) if len(frame.split("."))>1 and frame.split(".")[-1] !="txt"]
+        files= sorted(files)
+        prev_im_orig = np.zeros((1,1))
+        prev_im = np.zeros((1,1)) # holder for previous image array
+        prev_pts = np.zeros((1,2)) # holder for previous
+        print(driver_path+video)
         for file in files:
             filename = driver_path+video+"/"+file
+            print(file)
             output_prefix = output_dir+video+"/"+file.split(".")[0]+"_"
             output_postfix = ".png"
             #Load file and do homography
@@ -217,42 +386,77 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
                         act_line = lines_act[ind]
                         prev_lines.append(angle_r_to_x_y[int(act_line[1]), int(act_line[0])])
 
-                    #Plot lines
-                    for line in best_lines:
-                        rho = line[0]
-                        theta = line[1]*np.pi/180
+                #     #Plot lines
+                #     for line in best_lines:
+                #         rho = line[0]
+                #         theta = line[1]*np.pi/180
 
-                        a = math.cos(theta)
-                        b = math.sin(theta)
-                        x0 = a * rho
-                        y0 = b * rho
-                        pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-                        pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
+                #         a = math.cos(theta)
+                #         b = math.sin(theta)
+                #         x0 = a * rho
+                #         y0 = b * rho
+                #         pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
+                #         pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
                     
-                        cv2.line(topdown_im, pt1, pt2, (255, 0, 0), 3, cv2.LINE_AA)
-                #        if np.isclose(theta, 0, atol=0.1):
-                        a = np.cos(theta)
-                        b = np.sin(theta)
-                        x0 = a * rho
-                        y0 = b * rho
-                        pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
-                        pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
-                        pt1 = (int(pt1[0]), int(pt1[1]))
-                        pt2 = (int(pt2[0]), int(pt2[1]))
-                #            print(pt1, pt2)
-                        cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-                        pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-                        pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
-                    #    cv2.line(cannydst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-                    for line in prev_lines:
-                        for i in range(len(line)-1):
-                            cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
-                    Image.fromarray(topdown_im).save(output_prefix+"lines_on_top_down"+output_postfix)
-                    normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
-                    Image.fromarray(normal).save(output_prefix+"lines_warped_back"+output_postfix)
+                #         cv2.line(topdown_im, pt1, pt2, (255, 0, 0), 3, cv2.LINE_AA)
+                # #        if np.isclose(theta, 0, atol=0.1):
+                #         a = np.cos(theta)
+                #         b = np.sin(theta)
+                #         x0 = a * rho
+                #         y0 = b * rho
+                #         pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
+                #         pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
+                #         pt1 = (int(pt1[0]), int(pt1[1]))
+                #         pt2 = (int(pt2[0]), int(pt2[1]))
+                # #            print(pt1, pt2)
+                #         cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
+                #         pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
+                #         pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
+                #     #    cv2.line(cannydst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
+                #     for line in prev_lines:
+                #         for i in range(len(line)-1):
+                #             cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
+                    # Image.fromarray(topdown_im).save(output_prefix+"lines_on_top_down"+output_postfix)
+                    # normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
+                    # Image.fromarray(normal).save(output_prefix+"lines_warped_back"+output_postfix)
 
-                    normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
-                    Image.fromarray(normal).save(output_prefix+"lines_on_canny"+output_postfix)
+                    # normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
+                    # Image.fromarray(normal).save(output_prefix+"lines_on_canny"+output_postfix)
+
+                    #
+                    if len(prev_pts) > 1: # if statement so it doesnt apply to the first image  
+                        dir = get_car_direction(im, prev_im_orig)
+                        shift = optical_flow(prev_im,unprocessed_topdown,prev_pts[1:,:])
+                        shift_lines = []
+                        for line in prev_lines:
+                            temp_line = np.array(line[:])
+                            temp_line[:,0] = temp_line[:,0] + shift
+                            shift_lines.append(temp_line.tolist())
+                        prev_lines = shift_lines
+                        for line in prev_lines:
+                            for i in range(len(line)-1):
+                                cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
+                                pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([line[i][0], line[i][1],1]))
+                                pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([line[i+1][0], line[i+1][1], 1]))
+                                pt1 = (int(pt1[0]), int(pt1[1]))
+                                pt2 = (int(pt2[0]), int(pt2[1]))
+                                cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
+                        normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
+                        Image.fromarray(normal).save(output_prefix+"lines_warped_back"+output_postfix)
+
+                        normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
+                        Image.fromarray(normal).save(output_prefix+"lines_on_canny"+output_postfix)
+
+                    # convert prev_lines to points
+                    prev_pts = np.zeros((1,2))
+                    for line in prev_lines:
+                        prev_pts = np.append(prev_pts,np.array(line[:]), axis = 0)
+                    prev_im = unprocessed_topdown
+                    prev_im_orig = im
+
+                
+            # else:  
+
 
                     # normal =  cv2.cvtColor(canny, cv2.COLOR_BGR2RGB)
                     # Image.fromarray(normal).save(output_prefix+"canny.png")
@@ -287,126 +491,3 @@ params = (0.51, 0.32, -0.03, 7.4, 0.05)
 driver = "./CULane/driver_182_30frame/"
 output_dir = "./driver_182_30frame_outputs/"
 generate_outputs_for_driver(driver, output_dir, params)
-
-# im = load_im(file)
-# H, box_im, topdown_im = topdown(im, params)
-
-# # Image.fromarray(box_im).save("image_with_box.png")
-# # Image.fromarray(topdown_im).save("top_down_image.png")
-# # # edges = ski.feature.canny(topdown_im, 2, 1, 25)
-# # # lines = ski.transform.probabilistic_hough_line(edges, threshold=10, line_length=5, line_gap=3)
-# # # plt.imshow(edges*0)
-# # # for line in lines:
-# # #     p0, p1 = line
-# # #     plt.plot((p0[0], p1[0]), (p0[1], p1[1]))
-# # # # plt.imshow(edges)
-# # # # hspace, angles, dist = ski.transform.hough_line(edges)
-# # # plt.show()
-
-# # Image.fromarray(topdown_im).show()
-
-# clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-# topdown_im = clahe.apply(topdown_im)
-
-# # topdown_im = cv2.equalizeHist(topdown_im)
-
-# topdown_im = cv2.GaussianBlur(topdown_im, (17, 17), 3, 3)
-
-# Image.fromarray(topdown_im).show()
-
-# #driver 182 hough line params
-# cdst = cv2.Canny(np.uint8(topdown_im), 40, 50, None, 3)
-# canny = cv2.Canny(np.uint8(topdown_im), 40, 50, None, 3)
-
-# hough = np.copy(canny)
-# cdst = cv2.cvtColor(np.uint8(im), cv2.COLOR_RGB2BGR)
-# cannydst = cv2.cvtColor(hough, cv2.COLOR_GRAY2BGR)
-
-# # lines = cv2.HoughLines(np.copy(canny), 1, np.pi / 180, 50, None, 0, 0)
-# # # print(lines.shape)
-# # lines = np.squeeze(lines)
-# # print(lines)
-# # print(lines.shape)
-# lines = hough_lines(canny, 30)
-# two_pi_lines = lines[np.abs(lines[:,1] - 2*np.pi) < 0.05]
-# two_pi_lines[:,1] = two_pi_lines[:,1] - 2*np.pi
-# pi_lines = lines[np.abs(lines[:,1] - np.pi)<0.05]
-# pi_lines[:,1] = pi_lines[:,1]-np.pi
-# lines = lines[lines[:, 1] < 0.05]
-# #lines = np.vstack((lines[lines[:, 1] < 0.05], pi_lines, two_pi_lines))
-# h_lines = lines
-# if len(lines)>3:
-#     centers, _ = kmeans(lines, 4)
-#     if len(centers)>3:
-#         best_lines = np.zeros(shape=centers.shape)
-#         for i in range(len(centers)):
-#             best_lines[i] = lines[np.argmin(np.linalg.norm(lines - centers[i], axis=1))]
-#         print(best_lines)
-#         if best_lines is not None:
-#             for line in best_lines:
-#                 rho = line[0]
-#                 theta = line[1]
-
-#                 a = math.cos(theta)
-#                 b = math.sin(theta)
-#                 x0 = a * rho
-#                 y0 = b * rho
-#                 pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-#                 pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
-            
-#                 cv2.line(topdown_im, pt1, pt2, (255, 0, 0), 3, cv2.LINE_AA)
-#         #        if np.isclose(theta, 0, atol=0.1):
-#                 a = np.cos(theta)
-#                 b = np.sin(theta)
-#                 x0 = a * rho
-#                 y0 = b * rho
-#                 pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
-#                 pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
-#                 pt1 = (int(pt1[0]), int(pt1[1]))
-#                 pt2 = (int(pt2[0]), int(pt2[1]))
-#         #            print(pt1, pt2)
-#                 cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-#                 pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-#                 pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
-#                 cv2.line(cannydst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-
-
-# #driver 23 hough params
-# # dst = cv2.Canny(np.uint8(topdown_im), 50, 200, None, 3)
-# # #cdst = cv2.cvtColor(dst, cv2.COLOR_GRAY2BGR)
-# # canny = cv2.Canny(np.uint8(topdown_im), 50, 200, None, 3)
-# # lines = cv2.HoughLines(dst, 1, np.pi / 180, 80, None, 0, 0)
-
-# #Uncomment this if you want to plot hough lines raw output
-# # lines = np.expand_dims(h_lines, axis=1)
-# # if lines is not None:
-# #     for i in range(0, len(lines)):
-# #         rho = lines[i][0][0]
-# #         theta = lines[i][0][1]
-# #         if np.isclose(theta, 0, atol=0.1):
-# #             a = np.cos(theta)
-# #             b = np.sin(theta)
-# #             x0 = a * rho
-# #             y0 = b * rho
-# #             pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
-# #             pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
-# #             pt1 = (int(pt1[0]), int(pt1[1]))
-# #             pt2 = (int(pt2[0]), int(pt2[1]))
-# # #            print(pt1, pt2)
-# #             cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-# #             # pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 1000*(-b)), int(y0 + 1000*(a)) ,1]))
-# #             # pt1 = (int(pt1[0]), int(pt1[1]))
-# #             # cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-# #             pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-# #             pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
-# #             cv2.line(cannydst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-
-# Image.fromarray(topdown_im).save("lines_on_top_down_0.png")
-# normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
-# Image.fromarray(normal).save("lines_warped_back_0.png")
-
-# normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
-# Image.fromarray(normal).save("lines_on_canny_0.png")
-
-# normal =  cv2.cvtColor(canny, cv2.COLOR_BGR2RGB)
-# Image.fromarray(normal).save("canny.png")
