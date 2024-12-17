@@ -59,13 +59,14 @@ def warp(im: np.ndarray, box_coords: List[np.ndarray], H: np.ndarray):
     off_min, off_max = warp_canvas_size(box_coords, transform_H)
 
     transform_S = ski.transform.SimilarityTransform(translation=-off_min)
-    transform_inv = (transform_H + transform_S).inverse
+    transform_HS = transform_H + transform_S
+    transform_inv = transform_HS.inverse
 
     result_shape = off_max - off_min
 
     im_warp = ski.transform.warp(im, transform_inv, preserve_range=True, output_shape=result_shape)
 
-    return im_warp
+    return im_warp, transform_HS
 
 def topdown(im, params, box_dim=400):
     im_h, im_w = im.shape
@@ -91,15 +92,37 @@ def topdown(im, params, box_dim=400):
 
     H = hmat_solve_h([crds_to_hmat(*pair) for pair in zip(box_coords, box_map)])
 
-    warp_im = warp(im, box_coords, H).astype(np.uint8)
+    warp_im, transform = warp(im, box_coords, H)
+    warp_im = warp_im.astype(np.uint8)
 
     im[ski.draw.line(*box_coords[0], *box_coords[1])[::-1]] = 255
     im[ski.draw.line(*box_coords[1], *box_coords[2])[::-1]] = 255
     im[ski.draw.line(*box_coords[2], *box_coords[3])[::-1]] = 255
     im[ski.draw.line(*box_coords[3], *box_coords[0])[::-1]] = 255
 
-    return H, im, warp_im
+    return H, im, warp_im, transform
 
+def crd_cart_to_polar(p1, p2):
+    x1, y1 = p1
+    x2, y2 = p2
+
+    phi = np.arctan2(y2 - y1, x2 - x1)
+    theta = phi + np.pi / 2
+
+    rho = np.abs(x2 * y1 - x1 * y2) / np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+    return rho, theta
+
+def reference_lines(ref_fname, transform):
+    def line_to_polar(line):
+        coords = [float(v) for v in line.strip().split(' ')]
+
+        p1 = transform(coords[:2])[0]
+        p2 = transform(coords[-2:])[0]
+
+        return crd_cart_to_polar(p1, p2)
+
+    with open(ref_fname, 'r') as ref_file:
+        return np.array([line_to_polar(line) for line in ref_file.readlines()])
 
 def hough_lines(img, threshold):
     r_max = math.ceil(np.sqrt(img.shape[0]**2+img.shape[1]**2))
@@ -321,11 +344,39 @@ def get_car_direction(im0, im1):
         # ax.imshow(im1,cmap='gray')
     pass
 
+def plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix, output_postfix):
+    for line in prev_lines:
+        for i in range(len(line)-1):
+            cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
+            pt1 = transform.inverse(crd_homog_to_cart(np.array([line[i][0], line[i][1],1])))[0]
+            pt2 = transform.inverse(crd_homog_to_cart(np.array([line[i+1][0], line[i+1][1], 1])))[0]
+            print(pt1)
+            pt1 = (int(pt1[0]), int(pt1[1]))
+            pt2 = (int(pt2[0]), int(pt2[1]))
+            cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
+    normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
+    Image.fromarray(normal).save(output_prefix+"lines_warped_back"+output_postfix)
+
+    normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
+    Image.fromarray(normal).save(output_prefix+"lines_on_canny"+output_postfix)
+
+
+
+def get_optical_flow_lines(im, prev_im, prev_im_orig, unprocessed_topdown, prev_pts, prev_lines):
+    dir = get_car_direction(im, prev_im_orig)
+    shift = optical_flow(prev_im,unprocessed_topdown,prev_pts[1:,:])
+    shift_lines = []
+    for line in prev_lines:
+        temp_line = np.array(line[:])
+        temp_line[:,0] = temp_line[:,0] + shift
+        shift_lines.append(temp_line.tolist())
+    return shift_lines
 def generate_outputs_for_driver(driver_path, output_dir, homog_params):
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
     direct = sorted(os.listdir(driver))
     for video in direct[30:31]:
+        prev_lines = []
         if not os.path.isdir(output_dir+video):
             os.mkdir(output_dir+video)
         files = [frame for frame in os.listdir(driver_path+video) if len(frame.split("."))>1 and frame.split(".")[-1] !="txt"]
@@ -333,15 +384,13 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
         prev_im_orig = np.zeros((1,1))
         prev_im = np.zeros((1,1)) # holder for previous image array
         prev_pts = np.zeros((1,2)) # holder for previous
-        print(driver_path+video)
         for file in files:
             filename = driver_path+video+"/"+file
-            print(file)
             output_prefix = output_dir+video+"/"+file.split(".")[0]+"_"
             output_postfix = ".png"
             #Load file and do homography
             im = load_im(filename)
-            H, box_im, topdown_im = topdown(im, homog_params)
+            H, box_im, topdown_im, transform = topdown(im, homog_params)
 #            Image.fromarray(topdown_im).save(output_prefix+"topdown.png")
             unprocessed_topdown = np.copy(topdown_im)
             #Histogram
@@ -357,16 +406,10 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
             cannydst = cv2.cvtColor(hough, cv2.COLOR_GRAY2BGR)
             #Compute Hough Transform
             lines, angle_r_to_x_y = hough_lines(canny, 30)
-            near_zero = lines[lines[:, 1] < 0.03]
-            two_pi_lines = lines[np.abs(lines[:,1] - 360) < 0.03]
+            near_zero = lines[lines[:, 1] < 2]
+            two_pi_lines = lines[np.abs(lines[:,1] - 360) < 2]
             two_pi_copy = np.copy(two_pi_lines)
             two_pi_lines[:,1] = two_pi_lines[:,1] - 360
-            pi_lines = lines[np.abs(lines[:,1] - 180)<0.03]
-            pi_copy = np.copy(pi_lines)
-            
-            pi_lines[:,1] = pi_lines[:,1]-180
-            # lines = np.vstack((near_zero, pi_lines, two_pi_lines))
-            # lines_act = np.vstack((near_zero, pi_copy, two_pi_copy))
             
             lines = np.vstack((near_zero, two_pi_lines))
             lines_act = np.vstack((near_zero, two_pi_copy))
@@ -375,85 +418,95 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
                 centers, _ = kmeans(lines.astype(float), 4)
                 #centers, _ = kmeans2(lines, 4, minit="++")
                 #Check if 4 centers, if so Hough Lines
-                if len(centers)>3:
+              #  if len(centers)>3:
                     #Get actual lines closest to cluster center
-                    prev_lines = []
-                    best_lines = np.zeros(shape=centers.shape)
-                    prev_lines
-                    for i in range(len(centers)):
-                        ind = np.argmin(np.linalg.norm(lines - centers[i], axis=1))
-                        best_lines[i] = lines[ind]
-                        act_line = lines_act[ind]
-                        prev_lines.append(angle_r_to_x_y[int(act_line[1]), int(act_line[0])])
+                cur_lines = []
+                best_lines = np.zeros(shape=centers.shape)
+                good_lines = True
+                for i in range(len(centers)):
+                    dists_to_cluster = np.linalg.norm(lines - centers[i], axis=1)
+                    ind = np.argmin(dists_to_cluster)
+                    best_lines[i] = lines[ind]
+                    act_line = lines_act[ind]
+                    # if dists_to_cluster.min() > 0:
+                    #     ind = np.argmin(dists_to_cluster)
+                    #     best_lines[i] = lines[ind]
+                    #     act_line = lines_act[ind]
+                    # else:
+                    #     inds = np.where(dists_to_cluster < 10)
+                    #     fil_lines = lines_act[inds]
+                    #     temp = np.array(list(map(len, angle_r_to_x_y[fil_lines[:,1], fil_lines[:,0]])))
+                    #     ind = np.argmax(temp)
+                    #     best_lines[i] = fil_lines[ind]
+                    #     act_line = fil_lines[ind]
+               #     print(act_line)
+                    pts = angle_r_to_x_y[act_line[1], act_line[0]]
+                    if len(pts) < 35:
+                        good_lines = False
+                        break
+                    cur_lines.append(pts)
+                if good_lines:
+                    #Plot lines
+                    prev_lines = cur_lines
+                    for line in best_lines:
+                        rho = line[0]
+                        theta = line[1]*np.pi/180
 
-                #     #Plot lines
-                #     for line in best_lines:
-                #         rho = line[0]
-                #         theta = line[1]*np.pi/180
-
-                #         a = math.cos(theta)
-                #         b = math.sin(theta)
-                #         x0 = a * rho
-                #         y0 = b * rho
-                #         pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-                #         pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
+                        a = math.cos(theta)
+                        b = math.sin(theta)
+                        x0 = a * rho
+                        y0 = b * rho
+                        pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
+                        pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
                     
-                #         cv2.line(topdown_im, pt1, pt2, (255, 0, 0), 3, cv2.LINE_AA)
-                # #        if np.isclose(theta, 0, atol=0.1):
-                #         a = np.cos(theta)
-                #         b = np.sin(theta)
-                #         x0 = a * rho
-                #         y0 = b * rho
-                #         pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
-                #         pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
-                #         pt1 = (int(pt1[0]), int(pt1[1]))
-                #         pt2 = (int(pt2[0]), int(pt2[1]))
-                # #            print(pt1, pt2)
-                #         cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-                #         pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-                #         pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
-                #     #    cv2.line(cannydst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-                #     for line in prev_lines:
-                #         for i in range(len(line)-1):
-                #             cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
-                    # Image.fromarray(topdown_im).save(output_prefix+"lines_on_top_down"+output_postfix)
-                    # normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
-                    # Image.fromarray(normal).save(output_prefix+"lines_warped_back"+output_postfix)
-
-                    # normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
-                    # Image.fromarray(normal).save(output_prefix+"lines_on_canny"+output_postfix)
-
-                    #
-                    if len(prev_pts) > 1: # if statement so it doesnt apply to the first image  
-                        dir = get_car_direction(im, prev_im_orig)
-                        shift = optical_flow(prev_im,unprocessed_topdown,prev_pts[1:,:])
-                        shift_lines = []
-                        for line in prev_lines:
-                            temp_line = np.array(line[:])
-                            temp_line[:,0] = temp_line[:,0] + shift
-                            shift_lines.append(temp_line.tolist())
-                        prev_lines = shift_lines
-                        for line in prev_lines:
-                            for i in range(len(line)-1):
-                                cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
-                                pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([line[i][0], line[i][1],1]))
-                                pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([line[i+1][0], line[i+1][1], 1]))
-                                pt1 = (int(pt1[0]), int(pt1[1]))
-                                pt2 = (int(pt2[0]), int(pt2[1]))
-                                cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
-                        normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
-                        Image.fromarray(normal).save(output_prefix+"lines_warped_back"+output_postfix)
-
-                        normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
-                        Image.fromarray(normal).save(output_prefix+"lines_on_canny"+output_postfix)
-
-                    # convert prev_lines to points
-                    prev_pts = np.zeros((1,2))
+                        cv2.line(topdown_im, pt1, pt2, (255, 0, 0), 3, cv2.LINE_AA)
+                #        if np.isclose(theta, 0, atol=0.1):
+                        a = np.cos(theta)
+                        b = np.sin(theta)
+                        x0 = a * rho
+                        y0 = b * rho
+                        pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
+                        pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
+                        pt1 = (int(pt1[0]), int(pt1[1]))
+                        pt2 = (int(pt2[0]), int(pt2[1]))
+                #            print(pt1, pt2)
+                        cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
+                        pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
+                        pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
+                    #    cv2.line(cannydst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
                     for line in prev_lines:
-                        prev_pts = np.append(prev_pts,np.array(line[:]), axis = 0)
-                    prev_im = unprocessed_topdown
-                    prev_im_orig = im
+                        for i in range(len(line)-1):
+                            cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
+                    Image.fromarray(topdown_im).save(output_prefix+"lines_on_top_down"+output_postfix)
+                    normal = cv2.cvtColor(cdst, cv2.COLOR_BGR2RGB)
+                    Image.fromarray(normal).save(output_prefix+"lines_warped_back"+output_postfix)
 
+                    normal = cv2.cvtColor(cannydst, cv2.COLOR_BGR2RGB)
+                    Image.fromarray(normal).save(output_prefix+"lines_on_canny"+output_postfix)
+
+                #
+                else:
+                    if len(prev_pts) > 1: # if statement so it doesnt apply to the first image  
+                        prev_lines = get_optical_flow_lines(im, prev_im, prev_im_orig, unprocessed_topdown, prev_pts, prev_lines)
+                        
+                        best_lines = np.zeros(shape=(len(prev_lines), 2))
+                        for i in range(len(prev_lines)):
+                            best_lines[i] = crd_cart_to_polar(prev_lines[i][0], prev_lines[i][-1])
+                        plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix, output_postfix)
+
+            else:
+                if len(prev_pts)>1:
+                    prev_lines = get_optical_flow_lines(im, prev_im, prev_im_orig, unprocessed_topdown, prev_pts, prev_lines)
+        #            print(prev_lines)
+                    best_lines = np.zeros(shape=(len(prev_lines), 2))
+                    for i in range(len(prev_lines)):
+                        best_lines[i] = crd_cart_to_polar(prev_lines[i][0], prev_lines[i][-1])
+                    plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix, output_postfix)
+                        # convert prev_lines to points
+            prev_pts = np.array([pt for line in prev_lines for pt in line])
+            prev_im = unprocessed_topdown
+            prev_im_orig = im
+            
                 
             # else:  
 
