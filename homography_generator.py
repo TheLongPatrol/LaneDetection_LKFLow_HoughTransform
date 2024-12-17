@@ -9,6 +9,11 @@ import os
 import statistics
 
 from scipy.cluster.vq import vq, kmeans, whiten, kmeans2
+from scipy.spatial.distance import cdist
+
+
+PLOT = False
+np.random.seed(2024543)
 
 def load_im(filename) -> np.ndarray:
     img = Image.open(filename)
@@ -239,13 +244,16 @@ def optical_flow(topdown_im_0,topdown_im_1,p0):
     # print(mag,ang)
     mvmt_mag = np.linalg.norm(p1-p0, axis = 1)
 
-    fig, ax = plt.subplots()
-    ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
+    if PLOT:
+        fig, ax = plt.subplots()
+        ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
 
-    # plt.scatter(p1[:,0],p1[:,1])
-    # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
-    ax.imshow(topdown_im_0,cmap='gray')
-    plt.show()
+        # plt.scatter(p1[:,0],p1[:,1])
+        # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
+        
+        ax.imshow(topdown_im_0,cmap='gray')
+        plt.show()
+    
     # print(shift)
 
     return shift
@@ -328,14 +336,15 @@ def get_car_direction(im0, im1):
         # print(p0)
         # print(pnt_dist)
 
+        if PLOT:
+            fig, ax = plt.subplots()
+            ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
 
-        fig, ax = plt.subplots()
-        ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
+            # plt.scatter(p1[:,0],p1[:,1])
+            # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
 
-        # plt.scatter(p1[:,0],p1[:,1])
-        # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
-        ax.imshow(im0,cmap='gray')
-        plt.show()
+            ax.imshow(im0,cmap='gray')
+            plt.show()
 
         # fig, ax = plt.subplots()
         # ax.imshow(im0,cmap='gray')
@@ -350,7 +359,7 @@ def plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix,
             cv2.line(cannydst, line[i], line[i+1], (0,0,255), 3, cv2.LINE_AA)
             pt1 = transform.inverse(crd_homog_to_cart(np.array([line[i][0], line[i][1],1])))[0]
             pt2 = transform.inverse(crd_homog_to_cart(np.array([line[i+1][0], line[i+1][1], 1])))[0]
-            print(pt1)
+
             pt1 = (int(pt1[0]), int(pt1[1]))
             pt2 = (int(pt2[0]), int(pt2[1]))
             cv2.line(cdst, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
@@ -384,13 +393,19 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
         prev_im_orig = np.zeros((1,1))
         prev_im = np.zeros((1,1)) # holder for previous image array
         prev_pts = np.zeros((1,2)) # holder for previous
+
+        errors_file = open(output_dir+video+"_errors.txt", 'w')
+
         for file in files:
             filename = driver_path+video+"/"+file
+            ref_filename = driver_path+video+"/"+file[:-4] + ".lines.txt"
+
             output_prefix = output_dir+video+"/"+file.split(".")[0]+"_"
             output_postfix = ".png"
             #Load file and do homography
             im = load_im(filename)
             H, box_im, topdown_im, transform = topdown(im, homog_params)
+
 #            Image.fromarray(topdown_im).save(output_prefix+"topdown.png")
             unprocessed_topdown = np.copy(topdown_im)
             #Histogram
@@ -404,6 +419,20 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
             hough = np.copy(canny)
             cdst = cv2.cvtColor(np.uint8(im), cv2.COLOR_RGB2BGR)
             cannydst = cv2.cvtColor(hough, cv2.COLOR_GRAY2BGR)
+
+            ref_lines = reference_lines(ref_filename, transform)
+
+            for rho, theta in ref_lines:
+                a = np.cos(theta)
+                b = np.sin(theta)
+                x0 = a * rho
+                y0 = b * rho
+                pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
+                pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
+                pt1 = (int(pt1[0]), int(pt1[1]))
+                pt2 = (int(pt2[0]), int(pt2[1]))
+                cv2.line(cdst, pt1, pt2, (0,255,0), 3, cv2.LINE_AA)
+
             #Compute Hough Transform
             lines, angle_r_to_x_y = hough_lines(canny, 30)
             near_zero = lines[lines[:, 1] < 2]
@@ -506,13 +535,19 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
             prev_pts = np.array([pt for line in prev_lines for pt in line])
             prev_im = unprocessed_topdown
             prev_im_orig = im
-            
-                
+
+            line_dists = cdist(ref_lines, best_lines, metric='sqeuclidean')
+
+            error = (np.sum(np.min(line_dists, axis=1)) + np.sum(np.min(line_dists, axis=0))) / 2
+
+            errors_file.write(f'{file}: {error:.2f}\n')
+            errors_file.flush()
             # else:  
 
 
                     # normal =  cv2.cvtColor(canny, cv2.COLOR_BGR2RGB)
                     # Image.fromarray(normal).save(output_prefix+"canny.png")
+        errors_file.close()
 
 # in source data, lane width -> 3.75m, marker length -> 3m
 
