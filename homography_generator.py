@@ -160,12 +160,7 @@ def hough_lines(img, threshold):
             if accumulator[i][r] == np.max(accumulator[ang_lower:ang_upper, left_bound:right_bound]):
                 filtered_acc[i][r] = accumulator[i][r]
                 accumulator[ang_lower:ang_upper, left_bound:right_bound] = 0
-        for i in range(178, 183):
-            ang_lower = max(0, i-2)
-            ang_upper = i+2
-            if accumulator[i][r] == np.max(accumulator[ang_lower:ang_upper, left_bound:right_bound]):
-                filtered_acc[i][r] = accumulator[i][r]
-                accumulator[ang_lower:ang_upper, left_bound:right_bound] = 0
+
         for i in range(354,360):
             ang_lower = i-2
             ang_upper = min(359, i+2)
@@ -271,7 +266,7 @@ def get_car_direction(im0, im1):
 
     p0 = cv2.goodFeaturesToTrack(im0.astype('uint8'), mask = None, **feature_params)
 
-    p1, st, err = cv2.calcOpticalFlowPyrLK(im0.astype('uint8'), im1.astype('uint8'), p0, None, **lk_params)
+    p1, st, err = cv2.calcOpticalFlowPyrLK(im0.astype('uint8'), im1.astype('uint8'), p0.astype('float32'), None, **lk_params)
     p0 = p0.reshape(p0.shape[0], -1)
     p1 = p1.reshape(p1.shape[0], -1)
     # color = (255,0, 0)  # Green color in BGR format
@@ -372,7 +367,7 @@ def plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix,
 
 
 def get_optical_flow_lines(im, prev_im, prev_im_orig, unprocessed_topdown, prev_pts, prev_lines):
-    dir = get_car_direction(im, prev_im_orig)
+  #  dir = get_car_direction(im, prev_im_orig)
     shift = optical_flow(prev_im,unprocessed_topdown,prev_pts[1:,:])
     shift_lines = []
     for line in prev_lines:
@@ -384,18 +379,23 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
     direct = sorted(os.listdir(driver))
-    for video in direct[30:31]:
-        prev_lines = []
+    prev_pts = np.zeros((1,2)) # holder for previous
+    all_video_errors = 0
+    prev_lines = []
+    video_errors = []
+    prev_im_orig = np.zeros((1,1))
+    prev_im = np.zeros((1,1)) # holder for previous image array
+    for video in direct:
+        if video != "06010728_0081.MP4":
+            continue
         if not os.path.isdir(output_dir+video):
             os.mkdir(output_dir+video)
         files = [frame for frame in os.listdir(driver_path+video) if len(frame.split("."))>1 and frame.split(".")[-1] !="txt"]
         files= sorted(files)
-        prev_im_orig = np.zeros((1,1))
-        prev_im = np.zeros((1,1)) # holder for previous image array
-        prev_pts = np.zeros((1,2)) # holder for previous
-
+        
+        tot_error = 0
         errors_file = open(output_dir+video+"_errors.txt", 'w')
-
+        frame_errors = []
         for file in files:
             filename = driver_path+video+"/"+file
             ref_filename = driver_path+video+"/"+file[:-4] + ".lines.txt"
@@ -427,8 +427,8 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
                 b = np.sin(theta)
                 x0 = a * rho
                 y0 = b * rho
-                pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
-                pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
+                pt1 = transform.inverse(crd_homog_to_cart(np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1])))[0]
+                pt2 = transform.inverse(crd_homog_to_cart(np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1])))[0]
                 pt1 = (int(pt1[0]), int(pt1[1]))
                 pt2 = (int(pt2[0]), int(pt2[1]))
                 cv2.line(cdst, pt1, pt2, (0,255,0), 3, cv2.LINE_AA)
@@ -494,8 +494,8 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
                         b = np.sin(theta)
                         x0 = a * rho
                         y0 = b * rho
-                        pt1 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1]))
-                        pt2 = crd_homog_to_cart(np.linalg.inv(H) @ np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1]))
+                        pt1 = transform.inverse(crd_homog_to_cart(np.array([int(x0 + 500*(-b)), int(y0 + 500*(a)) ,1])))[0]
+                        pt2 = transform.inverse(crd_homog_to_cart(np.array([int(x0 - 1000*(-b)), int(y0 - 1000*(a)), 1])))[0]
                         pt1 = (int(pt1[0]), int(pt1[1]))
                         pt2 = (int(pt2[0]), int(pt2[1]))
                 #            print(pt1, pt2)
@@ -522,7 +522,9 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
                         for i in range(len(prev_lines)):
                             best_lines[i] = crd_cart_to_polar(prev_lines[i][0], prev_lines[i][-1])
                         plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix, output_postfix)
-
+                        
+                    else:
+                        best_lines = np.zeros(shape=(4,2))
             else:
                 if len(prev_pts)>1:
                     prev_lines = get_optical_flow_lines(im, prev_im, prev_im_orig, unprocessed_topdown, prev_pts, prev_lines)
@@ -532,13 +534,20 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
                         best_lines[i] = crd_cart_to_polar(prev_lines[i][0], prev_lines[i][-1])
                     plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix, output_postfix)
                         # convert prev_lines to points
+                else:
+                    best_lines = np.zeros(shape=(4,2))
             prev_pts = np.array([pt for line in prev_lines for pt in line])
             prev_im = unprocessed_topdown
             prev_im_orig = im
+            if ref_lines.shape[0] > 0:
 
-            line_dists = cdist(ref_lines, best_lines, metric='sqeuclidean')
+                line_dists = cdist(ref_lines, best_lines, metric='sqeuclidean')
 
-            error = (np.sum(np.min(line_dists, axis=1)) + np.sum(np.min(line_dists, axis=0))) / 2
+                error = (np.sum(np.min(line_dists, axis=1)) + np.sum(np.min(line_dists, axis=0))) / 2
+                tot_error +=error
+                frame_errors.append(error)
+            else:
+                error = -1
 
             errors_file.write(f'{file}: {error:.2f}\n')
             errors_file.flush()
@@ -547,8 +556,24 @@ def generate_outputs_for_driver(driver_path, output_dir, homog_params):
 
                     # normal =  cv2.cvtColor(canny, cv2.COLOR_BGR2RGB)
                     # Image.fromarray(normal).save(output_prefix+"canny.png")
+        errors_file.write(f'Total error: {tot_error:.2f}\n')
+        frame_errors = np.array(frame_errors)
+        errors_file.write(f"Average error:  {frame_errors.mean():.2f}\n")
+#        errors_file.write(f"Max error: {frame_errors.max():.2f}\n")
         errors_file.close()
-
+        fig, ax = plt.subplots()
+        ax.set_title("Error Accumulated over Frames")
+        ax.plot(np.arange(frame_errors.shape[0]), np.cumsum(frame_errors))
+        fig.savefig(output_dir+video+"_error_plot.png")
+        plt.close(fig)
+        all_video_errors+=tot_error
+        video_errors.append(tot_error)
+    print("Total Video Error: ", all_video_errors)
+    video_errors = np.array(video_errors)
+    print("Average Video Error:", video_errors.mean())
+    plt.title("Error Accumulated over Videos")
+    plt.plot(np.arange(video_errors.shape[0]), np.cumsum(video_errors))
+    plt.savefig(output_dir+"_video_errors.png")
 # in source data, lane width -> 3.75m, marker length -> 3m
 
 
@@ -577,5 +602,5 @@ params = (0.51, 0.32, -0.03, 7.4, 0.05)
 
 
 driver = "./CULane/driver_182_30frame/"
-output_dir = "./driver_182_30frame_outputs/"
+output_dir = "./driver_182_30frame_outputs_test/"
 generate_outputs_for_driver(driver, output_dir, params)
