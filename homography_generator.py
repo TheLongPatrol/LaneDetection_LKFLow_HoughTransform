@@ -183,7 +183,77 @@ def hough_lines(img, threshold):
     #thetas, rs = np.nonzero(np.where(accumulator >  0.5*np.max(accumulator)))
     return  np.vstack((np.arange(r_max)[rs], thetas)).T, filtered_angle_r_to_x_y
 
+def get_image_direction(topdown_im_0, topdown_im_1):
+
+    feature_params = dict( maxCorners = 100, 
+                        qualityLevel = 0.3, 
+                        minDistance = 7, 
+                        blockSize = 7 ) 
+    
+    # Parameters for lucas kanade optical flow 
+    lk_params = dict( winSize = (20, 20), 
+                    maxLevel = 7, 
+                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 
+                                10, 0.03)) 
+
+    p0 = cv2.goodFeaturesToTrack(topdown_im_0.astype('uint8'), mask = None, **feature_params)
+    # p0 = p0[p0[:,0,1] < 350]
+
+
+    p1, st, err = cv2.calcOpticalFlowPyrLK(topdown_im_0.astype('uint8'), topdown_im_1.astype('uint8'), p0, None, **lk_params)
+    p0 = p0.reshape(p0.shape[0], -1)
+    p1 = p1.reshape(p1.shape[0], -1)
+    # color = (255,0, 0)  # Green color in BGR format
+
+    mvmt = p1-p0
+    mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
+    # print(mag,ang)
+    mvmt_mag = np.linalg.norm(p1-p0, axis = 1)
+
+    #calculate relative motion from center distance
+    origin = np.array([int(topdown_im_0.shape[1]/2),775])
+
+    # determine the type of motion
+    # determine if all have a component in the horiz moving in one direction
+    mvmt_pos = sum(mvmt[:,0]> 0) 
+    mvmt_neg = sum(mvmt[:,0]< 0) 
+
+    # assume small motion
+    pnt_dist = p0 - origin
+    mag_0, ang_0 = cv2.cartToPolar(pnt_dist[..., 0], pnt_dist[..., 1])
+
+     # partition into right/left sides
+    right_pts_mask = pnt_dist[:,0] > 0 
+    left_pts = pnt_dist[:,0] < 0 
+
+    fwd = True
+    if mvmt.shape[0]>0:
+        if (mvmt_pos/sum(right_pts_mask)>0.7) or (mvmt_pos/sum(left_pts)>0.7):
+            fwd = True
+        else:
+            fwd = False
+
+        # if move in one direction, check if changing lanes or turning
+        # if turning, check what direction
+        right = False
+
+        if not fwd:
+            if mvmt_pos > mvmt_neg:
+                right = True
+            else:
+                right = False
+    
+
+    fig, ax = plt.subplots()
+    ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
+
+    ax.imshow(topdown_im_0,cmap='gray')
+    plt.show()
+    return [fwd,right]
+
 def optical_flow(topdown_im_0,topdown_im_1,p0):
+    
+    [fwd,right] = get_image_direction(topdown_im_0, topdown_im_1)
 
     # print(p0)   
     p0 = p0.reshape((p0.shape[0], 1,p0.shape[1])) 
