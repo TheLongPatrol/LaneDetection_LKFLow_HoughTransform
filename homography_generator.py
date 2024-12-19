@@ -267,14 +267,13 @@ def optical_flow(topdown_im_0,topdown_im_1,p0):
                        qualityLevel = 0.1,
                        minDistance = 1,
                        blockSize = 1 )
-    # print(p0.shape)
-    # p0 = cv2.goodFeaturesToTrack(topdown_im_0.astype('uint8'), mask = None, **feature_params)
-    # print(p0)
-    # p0 = p0[p0[:,0,1] < 350]
 
     p1, st, err = cv2.calcOpticalFlowPyrLK(topdown_im_0.astype('uint8'), topdown_im_1.astype('uint8'), p0.astype('float32'), None, **lk_params)
     p0 = p0.reshape(p0.shape[0], -1)
     p1 = p1.reshape(p1.shape[0], -1)
+
+    p0 = p0[st==1]
+    p1 = p1[st==1]
 
     # change in location of points
     mvmt = p1-p0
@@ -283,6 +282,8 @@ def optical_flow(topdown_im_0,topdown_im_1,p0):
 
     std_dev_ang = statistics.stdev(ang[:,0])
     std_dev_mag = statistics.stdev(mag[:,0])
+
+
 
     #filter based on standard deviation
     filter = ((ang[:,0] >= np.mean(ang[:,0]) - std_dev_ang) & 
@@ -293,130 +294,15 @@ def optical_flow(topdown_im_0,topdown_im_1,p0):
     
     p0 = p0[filter & filter_mag,:]
     p1 = p1[filter & filter_mag,:]
+
+    # filter based on direction
+
     mvmt = mvmt[filter & filter_mag,:]
     mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
     shift = np.mean((p1-p0)[:,0])
-    # print(np.mean(ang))
-
-    # p0 = p0[filter_mag,:]
-    # p1 = p1[filter_mag,:]
-    # mvmt = mvmt[filter_mag,:]
-    # p0 = p0[(ang >= np.mean(ang) - std_dev_ang) & 
-    #                  (ang <= np.mean(ang) + std_dev_ang),:]
-    
-
-
-    # print(mag,ang)
-    mvmt_mag = np.linalg.norm(p1-p0, axis = 1)
-
-    if PLOT:
-        fig, ax = plt.subplots()
-        ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
-
-        # plt.scatter(p1[:,0],p1[:,1])
-        # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
-        
-        ax.imshow(topdown_im_0,cmap='gray')
-        plt.show()
-    
-    # print(shift)
 
     return shift
 
-def get_car_direction(im0, im1):
-
-    feature_params = dict( maxCorners = 100,
-                        qualityLevel = 0.6,
-                        minDistance = 7,
-                        blockSize = 9 )
-    # Parameters for lucas kanade optical flow
-    lk_params = dict( winSize  = (15, 15),
-                    maxLevel = 2,
-                    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
-
-    p0 = cv2.goodFeaturesToTrack(im0.astype('uint8'), mask = None, **feature_params)
-
-    p1, st, err = cv2.calcOpticalFlowPyrLK(im0.astype('uint8'), im1.astype('uint8'), p0.astype('float32'), None, **lk_params)
-    p0 = p0.reshape(p0.shape[0], -1)
-    p1 = p1.reshape(p1.shape[0], -1)
-    # color = (255,0, 0)  # Green color in BGR format
-
-    # remove all points below the dashboard
-    dash = 400
-
-    # p1 = p1[p1[:,1] < 350]
-
-    # change in location of points
-    mvmt = p1-p0
-    mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
-    # print(mag,ang)
-    mvmt_mag = np.linalg.norm(p1-p0, axis = 1)
-
-    #calculate relative motion from center distance
-    origin = np.array([int(im0.shape[1]/2),775])
-
-    # determine the type of motion
-    # determine if all have a component in the horiz moving in one direction
-    mvmt_pos = sum(mvmt[:,0]> 0) 
-    mvmt_neg = sum(mvmt[:,0]< 0) 
-
-    fwd = True
-    if mvmt.shape[0]>0:
-        if (mvmt_pos/mvmt.shape[0]>0.3) & (mvmt_pos/mvmt.shape[0]<0.7):
-            fwd = True
-        else:
-            fwd = False
-
-        # if move in one direction, check if changing lanes or turning
-        # if turning, check what direction
-        right = False
-
-        if not fwd:
-            if mvmt_pos > mvmt_neg:
-                right = True
-            else:
-                right = False
-
-
-        # logic for lane change ?
-
-        # assume small motion
-        pnt_dist = p0 - origin
-        mag_0, ang_0 = cv2.cartToPolar(pnt_dist[..., 0], pnt_dist[..., 1])
-
-
-
-        # partition into right/left sides
-        right_pts_mask = pnt_dist[:,0] > 0 
-        left_pts = pnt_dist[:,0] < 0 
-
-        # filter out large angular distances irregularities
-        # do it based on movement
-        # if turning, filter out all not going in that direction
-        # if not turning, filter out based on all not pointing away from center
-        # print(180*(ang-ang_0)[right_pts_mask]/np.pi)
-
-
-        # filter out large magnatude change
-        # print(p0)
-        # print(pnt_dist)
-
-        if PLOT:
-            fig, ax = plt.subplots()
-            ax.quiver(p0[:,0], p0[:,1], mvmt[:,0], mvmt[:,1], angles='xy', scale_units='xy', scale=1, color='r')
-
-            # plt.scatter(p1[:,0],p1[:,1])
-            # img = mpimg.imread('/Users/dbelgorod/Documents/UIUC/Fall_2024/CS543/Project/driver_100_30frame/05250653_0338.MP4/00390.jpg')
-
-            ax.imshow(im0,cmap='gray')
-            plt.show()
-
-        # fig, ax = plt.subplots()
-        # ax.imshow(im0,cmap='gray')
-
-        # fig, ax = plt.subplots()
-        # ax.imshow(im1,cmap='gray')
-    pass
 
 def plot_lines_from_points(cdst, cannydst, prev_lines, transform, output_prefix, output_postfix):
     for line in prev_lines:
