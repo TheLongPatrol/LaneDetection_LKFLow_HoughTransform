@@ -295,7 +295,81 @@ def optical_flow(topdown_im_0,topdown_im_1,p0):
     p0 = p0[filter & filter_mag,:]
     p1 = p1[filter & filter_mag,:]
 
+    mvmt = p1-p0
+    mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
+    # print(mag,ang)
+    mvmt_mag = np.linalg.norm(p1-p0, axis = 1)
+
+    #calculate relative motion from center distance
+    origin = np.array([int(topdown_im_0.shape[1]/2),775])
+
+    # determine the type of motion
+    # determine if all have a component in the horiz moving in one direction
+    mvmt_pos = sum(mvmt[:,0]> 0) 
+    mvmt_neg = sum(mvmt[:,0]< 0) 
+
+    # assume small motion
+    pnt_dist = p0 - origin
+    mag_0, ang_0 = cv2.cartToPolar(pnt_dist[..., 0], pnt_dist[..., 1])
+
+     # partition into right/left sides
+    right_pts_mask = pnt_dist[:,0] > 0 
+    left_pts_mask = pnt_dist[:,0] < 0 
+
     # filter based on direction
+    if fwd: 
+        # filter all the points on the left side so they are pointing right
+        left_pts_p0 =p0[left_pts_mask]
+        left_pts_p1 =p1[left_pts_mask]
+        left_pts_mwmt = left_pts_p1-left_pts_p0
+        left_pts_p0 = left_pts_p0[left_pts_mwmt[:,0]>0]
+        left_pts_p1 = left_pts_p1[left_pts_mwmt[:,0]>0]
+
+        # filter all the points on the right side so that they are pointing left
+        right_pts_p0 =p0[right_pts_mask]
+        right_pts_p1 =p1[right_pts_mask]
+        right_pts_mwmt = right_pts_p1-right_pts_p0
+        right_pts_p0 = right_pts_p0[right_pts_mwmt[:,0]<0]
+        right_pts_p1 = right_pts_p1[right_pts_mwmt[:,0]<0]
+
+
+    else:
+        if right:
+            # filter all the points on the left side so they are pointing right
+            left_pts_p0 =p0[left_pts_mask]
+            left_pts_p1 =p1[left_pts_mask]
+            left_pts_mwmt = left_pts_p1-left_pts_p0
+            left_pts_p0 = left_pts_p0[left_pts_mwmt[:,0]>0]
+            left_pts_p1 = left_pts_p1[left_pts_mwmt[:,0]>0]
+
+            # filter all the points on the right side so that they are pointing left
+            right_pts_p0 =p0[right_pts_mask]
+            right_pts_p1 =p1[right_pts_mask]
+            right_pts_mwmt = right_pts_p1-right_pts_p0
+            right_pts_p0 = right_pts_p0[right_pts_mwmt[:,0]>0]
+            right_pts_p1 = right_pts_p1[right_pts_mwmt[:,0]>0]
+        else:
+            left_pts_p0 =p0[left_pts_mask]
+            left_pts_p1 =p1[left_pts_mask]
+            left_pts_mwmt = left_pts_p1-left_pts_p0
+            left_pts_p0 = left_pts_p0[left_pts_mwmt[:,0]<0]
+            left_pts_p1 = left_pts_p1[left_pts_mwmt[:,0]<0]
+
+            # filter all the points on the right side so that they are pointing left
+            right_pts_p0 =p0[right_pts_mask]
+            right_pts_p1 =p1[right_pts_mask]
+            right_pts_mwmt = right_pts_p1-right_pts_p0
+            right_pts_p0 = right_pts_p0[right_pts_mwmt[:,0]<0]
+            right_pts_p1 = right_pts_p1[right_pts_mwmt[:,0]<0]
+    # print(fwd)
+    # print(right)
+    print(right_pts_p0.shape)
+    print(left_pts_p0.shape)   
+    print(right_pts_p1.shape)
+    print(left_pts_p1.shape)
+    p0 = np.vstack((right_pts_p0,left_pts_p0))
+    p1 = np.vstack((right_pts_p1,left_pts_p1))
+    mvmt = p1-p0
 
     mvmt = mvmt[filter & filter_mag,:]
     mag, ang = cv2.cartToPolar(mvmt[..., 0], mvmt[..., 1])
